@@ -1,9 +1,9 @@
-
 import torch
 import torch.nn as nn
 from transformers import ElectraModel, ElectraTokenizer, AdamW, get_linear_schedule_with_warmup
 from transformers import AutoTokenizer
 from transformers import AutoModel, AutoConfig
+from transformers import BartForCausalLM, BartTokenizer
 
 class SimpleClassifier(nn.Module):
 
@@ -73,7 +73,36 @@ class Cartesian(nn.Module):
         final_output = self.classifier(last_hidden_cls)
         
         return final_output # (batch, sentiments*categories)
+
+class MainCategorySentimentGenerator(nn.Module):
+    def __init__(self, device, main_categories=4, sentiments=3, model_type="facebook/bart-large"):
+        super(MainCategorySentimentGenerator, self).__init__()
+        
+        self.main_categories = main_categories
+        self.sentiments = sentiments
+        self.encoder = BartForCausalLM.from_pretrained(model_type)
+        self.decoder = nn.Linear(self.encoder.config.hidden_size, main_categories*sentiments)
+        self.softmax = nn.Softmax(dim=1)
+        self.tokenizer = BartTokenizer.from_pretrained(model_type)
+        
+    def forward(self, input_ids, attention_mask, aspect_prompt):
+        input_ids = torch.cat((input_ids, aspect_prompt), dim=1)
+        attention_mask = torch.cat((attention_mask, torch.ones_like(aspect_prompt)), dim=1)
+        encoded_output = self.encoder(input_ids, attention_mask=attention_mask)[0]
+        encoded_output = encoded_output[:, -1, :] # Take the last hidden state of the sequence
+        decoded_output = self.decoder(encoded_output)
+        decoded_output = decoded_output.view(decoded_output.size(0), self.main_categories, self.sentiments)
+        decoded_output = self.softmax(decoded_output)
+        return decoded_output
     
+    def generate(self, input_text, aspect_prompt):
+        input_ids = torch.tensor(self.tokenizer.encode(input_text, return_tensors="pt")).unsqueeze(0)
+        aspect_prompt_ids = torch.tensor(self.tokenizer.encode(aspect_prompt, return_tensors="pt")).unsqueeze(0)
+        output = self.forward(input_ids, torch.ones_like(input_ids), aspect_prompt_ids)
+        main_category_output = output[0, :, :self.sentiments].argmax(dim=1)
+        sentiment_output = output[0, :, self.sentiments:].argmax(dim=1)
+        return main_category_output, sentiment_output
+
 class MainCategoryClassifier(nn.Module):
     def __init__(self, device, 
                  freeze_bert=False, 
