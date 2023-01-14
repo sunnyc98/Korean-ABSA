@@ -236,6 +236,105 @@ def get_class_weights():
     
     return (class_weights_sub, class_weights_main)
 
+def train_gen(model, 
+              train_dataloader, 
+              val_dataloader=None, 
+              loss_fn=nn.CrossEntropyLoss(), 
+              save_path=None, 
+              epochs=30, 
+              lr=1e-5, 
+              evaluation=True,
+              patience=2,
+              main_categories=4,
+              sentiments=3):
+    print('Training...')
+    optimizer = AdamW(model.parameters(), lr=lr, eps=1e-8)
+    cur_patience = 0
+    best_val_loss = 1e5
+    best_val_acc = 0
+    for epoch in range(epochs):
+        print(f"{'Epoch':^7} | {'Batch':^7} | {'Train Loss':^12} | {'Val Loss':^10} | {'Val Acc':^9} | {'Elapsed':^9}")
+        print("-"*70)
+        
+        t0_epoch, t0_batch = time.time(), time.time()
+        
+        total_loss, batch_loss, batch_counts = 0,0,0
+        model.train()
+        for step, batch in enumerate(train_dataloader):
+            batch_counts += 1
+            input_ids, attention_mask, aspect_prompt, labels = tuple(b.to(device) for b in batch)
+            
+            model.zero_grad()
+            
+            output = model(input_ids, attention_mask, aspect_prompt)
+            loss = loss_fn(output.view(-1, main_categories*sentiments), labels.view(-1))
+
+            batch_loss += loss.item()
+            total_loss += loss.item()
+            
+            loss.backward()
+            
+            clip_grad_norm_(model.parameters(), 1.0)
+            
+            optimizer.step()
+            if (step%20 ==0 and step != 0) or (step == len(train_dataloader)-1):
+                time_elapsed = time.time() - t0_batch
+                print(f"{epoch + 1:^7} | {str(step)+'/'+str(len(train_dataloader)):^7} | {batch_loss / batch_counts:^12.3f} | {'-':^10} | {'-':^9} | {time_elapsed:^9.2f}")
+                
+                batch_loss, batch_counts = 0, 0
+                t0_batch = time.time()
+            avg_train_loss = total_loss / len(train_dataloader)
+        
+        print("-"*70)
+        if evaluation==True:
+            val_loss, val_acc = evaluate_gen(model, val_dataloader, loss_fn=loss_fn)
+            time_elapsed = time.time() - t0_epoch
+            print(f"{epoch + 1:^7} | {'-':^7} | {avg_train_loss:^12.3f} | {val_loss:^10.3f} | {val_acc:^9.2f} | {time_elapsed:^9.2f}")
+        
+            print("-"*70)
+            lr = scheduler(avg_train_loss, lr)
+            
+            # Early stopping with patience
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                cur_patience = 0
+            else:
+                print('Val_loss did not improve.')
+                cur_patience += 1
+            if cur_patience >= patience:
+                print('Early Stopping. Training complete!')
+                return
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                torch.save(model.state_dict(), save_path)
+                print(f'Model saved to {save_path}')
+                
+def evaluate_gen(model, 
+                 val_dataloader, 
+                 loss_fn=nn.CrossEntropyLoss(),
+                 main_categories=4,
+                 sentiments=3):
+    model.eval()
+    total_loss, total_acc, total_counts = 0, 0, 0
+    with torch.no_grad():
+        for step, batch in enumerate(val_dataloader):
+            input_ids, attention_mask, aspect_prompt, labels = tuple(b.to(device) for b in batch)
+            output = model(input_ids, attention_mask, aspect_prompt)
+            
+            loss = loss_fn(output.view(-1, main_categories*sentiments), labels.view(-1))
+            total_loss += loss.item()
+            
+            output = output.view(-1, main_categories, sentiments)
+            pred = output.argmax(dim=-1)
+            
+            acc = pred.eq(labels).float().mean()
+            total_acc += acc.item()
+            total_counts += 1
+            
+    avg_val_loss = total_loss / total_counts
+    avg_val_acc = total_acc / total_counts
+    return avg_val_loss, avg_val_acc
+
 def Experiment(config, class_weights):
     class_weights_sub, class_weights_main = class_weights
     
@@ -308,4 +407,3 @@ if __name__ == '__main__':
     with open(config_dir) as input_file:
         config = yaml.safe_load(input_file)
     Experiment(config, class_weights)
-
